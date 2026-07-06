@@ -276,6 +276,36 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # Adaptive Chunked Prefill Configs
+        import os
+        self.adaptive_chunk_threshold = int(os.environ.get("VLLM_ADAPTIVE_CHUNK_THRESHOLD", "0"))
+        self.decode_load_threshold = int(os.environ.get("VLLM_DECODE_LOAD_THRESHOLD", "0"))
+
+    def _should_chunk(self, request: Request, used_budget: int) -> bool:
+        # 1. Respect original config
+        if not self.scheduler_config.enable_chunked_prefill:
+            return False
+            
+        # If not configured, fallback to default behavior (chunk)
+        if self.adaptive_chunk_threshold <= 0:
+            return True
+
+        prompt = request.num_prompt_tokens
+
+        # 3. NEVER let a prompt exceed the physical limits of the scheduler
+        if prompt > self.max_num_scheduled_tokens:
+            return True
+
+        # 2. Short prompt -> no chunk
+        if prompt <= self.adaptive_chunk_threshold:
+            return False
+
+        # 4. If decode load (used_budget) is too high -> chunk to protect throughput
+        if used_budget > self.decode_load_threshold:
+            return True
+
+        return False
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -389,6 +419,15 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+
+            used_budget = self.max_num_scheduled_tokens - token_budget
+            do_chunk = self._should_chunk(request, used_budget)
+            
+            if not do_chunk and num_new_tokens > token_budget:
+                # Cannot prefill entirely this step, skip and wait for next step
+                req_index += 1
+                continue
+                
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -656,14 +695,11 @@ class Scheduler(SchedulerInterface):
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
 
-                    # chunked prefill has to be enabled explicitly to allow
-                    # pooling requests to be chunked
-                    if (
-                        not self.scheduler_config.enable_chunked_prefill
-                        and num_new_tokens > token_budget
-                    ):
-                        # If chunked_prefill is disabled,
-                        # we can stop the scheduling here.
+                    used_budget = self.max_num_scheduled_tokens - token_budget
+                    do_chunk = self._should_chunk(request, used_budget)
+                    
+                    if not do_chunk and num_new_tokens > token_budget:
+                        # Cannot schedule fully without chunking, stop and wait for next step
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
@@ -1278,6 +1314,9 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
+        if bitmask is None:
+            return None
+            
         return GrammarOutput(structured_output_request_ids, bitmask)
 
     def update_from_output(
