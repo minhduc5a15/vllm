@@ -393,7 +393,14 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        
+        # --- PREFILL-PRIORITY ISOLATION HACK ---
+        # Pause decode if there are waiting requests and we have capacity.
+        can_admit_new = len(self.running) < self.max_num_running_reqs
+        has_waiting = len(self.waiting) > 0 or len(self.skipped_waiting) > 0
+        pause_decode = has_waiting and can_admit_new
+        
+        while (not pause_decode) and req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
             if (

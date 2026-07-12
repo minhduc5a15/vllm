@@ -1,0 +1,12 @@
+FROM vllm/vllm-openai:v0.22.1
+
+# Sao chép file đã sửa từ nhánh deploy-v0.22.1 vào /tmp
+COPY vllm/v1/core/sched/scheduler.py /tmp/scheduler.py
+
+# Chạy một lệnh Python nhỏ để lấy đường dẫn cài đặt của thư viện vllm trong image,
+# sau đó chép đè file từ /tmp vào đúng đường dẫn đó.
+RUN VLLM_PATH=$(python3 -c "import vllm; print(vllm.__path__[0])") && \
+    cp /tmp/scheduler.py $VLLM_PATH/v1/core/sched/scheduler.py && \
+    rm /tmp/scheduler.py
+
+# Nếu bạn có thêm file nào cần ghi đè, hãy thêm vào tương tự.
